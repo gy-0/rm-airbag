@@ -33,14 +33,30 @@ macOS 真正执行：/usr/bin/trash important-project
 - `rm-airbag` 本身使用 Zsh
 - shell 配置支持 Zsh、Bash 和 POSIX `sh`
 
-## 从源码安装
+## 使用 Homebrew 一键安装（推荐）
 
-下载或克隆项目后执行：
+复制并粘贴下面这一整行即可：
+
+```bash
+brew install gy-0/tap/rm-airbag && rm-airbag enable && /bin/zsh -lic 'rm-airbag doctor'
+```
+
+Homebrew 会自动下载并校验 Release，不需要用户自己克隆仓库。最后一步会启动一个
+新的 Zsh 登录环境并执行自检，确认 `rm` 已经由安全 shim 接管。
+
+## 从源码一键安装
+
+下面这一行会依次完成克隆、安装、启用和自检：
+
+```bash
+git clone --depth 1 https://github.com/gy-0/rm-airbag.git && ./rm-airbag/scripts/install.sh && /bin/zsh -lic 'rm-airbag doctor'
+```
+
+如果已经下载了源码，也可以在项目目录中执行：
 
 ```bash
 ./scripts/install.sh
-exec zsh -l
-rm-airbag doctor
+/bin/zsh -lic 'rm-airbag doctor'
 ```
 
 安装器会：
@@ -134,6 +150,14 @@ rm-airbag version
 
 ## 卸载
 
+通过 Homebrew 安装：
+
+```bash
+rm-airbag disable && brew uninstall gy-0/tap/rm-airbag
+```
+
+通过源码安装：
+
 ```bash
 ./scripts/uninstall.sh
 exec zsh -l
@@ -170,4 +194,3 @@ make package
 MIT，见 [LICENSE](LICENSE)。
 
 English: [README.md](README.md)
-

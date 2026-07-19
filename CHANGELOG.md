@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added the official `gy-0/tap/rm-airbag` Homebrew installation path.
+- Added one-line Homebrew and source installation commands.
+
 ## 0.1.0 - 2026-07-19
 
 - Add a Trash-first, fail-closed macOS `rm` wrapper.

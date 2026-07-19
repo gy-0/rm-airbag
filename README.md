@@ -47,14 +47,31 @@ unaware of it.
 - Zsh for the `rm-airbag` executable
 - Zsh, Bash, or POSIX `sh` for shell startup integration
 
+## Install with Homebrew
+
+Copy and paste this single command:
+
+```bash
+brew install gy-0/tap/rm-airbag && rm-airbag enable && /bin/zsh -lic 'rm-airbag doctor'
+```
+
+Homebrew downloads the verified release archive automatically, so you do not
+need to clone the repository. The final step opens a fresh Zsh login shell just
+long enough to verify that the `rm` shim is active.
+
 ## Install from source
 
-Download or clone the project, then run:
+To clone, install, enable, and verify in one paste:
+
+```bash
+git clone --depth 1 https://github.com/gy-0/rm-airbag.git && ./rm-airbag/scripts/install.sh && /bin/zsh -lic 'rm-airbag doctor'
+```
+
+Or, from an existing checkout, run:
 
 ```bash
 ./scripts/install.sh
-exec zsh -l
-rm-airbag doctor
+/bin/zsh -lic 'rm-airbag doctor'
 ```
 
 The installer:
@@ -152,6 +169,14 @@ rm-airbag version
 
 ## Uninstall
 
+Homebrew installation:
+
+```bash
+rm-airbag disable && brew uninstall gy-0/tap/rm-airbag
+```
+
+Source installation:
+
 ```bash
 ./scripts/uninstall.sh
 exec zsh -l
@@ -191,4 +216,3 @@ destructive fixtures at `/`, a real home directory, or a system path.
 MIT. See [LICENSE](LICENSE).
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
-
