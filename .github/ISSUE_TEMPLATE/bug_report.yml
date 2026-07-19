@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible rm-airbag problem using temporary paths
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never reproduce a bug against `/`, a real home directory, or a system path.
+        Use an isolated temporary directory and read SECURITY.md first.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "15.6"
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell and version
+      placeholder: "zsh 5.9"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: rm-airbag doctor output
+      description: Redact personal paths if necessary.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Safe reproduction
+      description: Use only an isolated temporary directory.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+

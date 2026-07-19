@@ -1,0 +1,516 @@
+#!/bin/zsh
+# rm-airbag: a Trash-first, fail-closed rm wrapper for macOS.
+
+emulate -L zsh
+
+typeset -gr RM_AIRBAG_VERSION="0.1.0"
+typeset -gr RM_AIRBAG_NAME="rm-airbag"
+typeset -gr RM_AIRBAG_TRASH_BIN="/usr/bin/trash"
+typeset -gr RM_AIRBAG_MARKER_START="# >>> rm-airbag >>>"
+typeset -gr RM_AIRBAG_MARKER_END="# <<< rm-airbag <<<"
+typeset -gr RM_AIRBAG_INVOKED_AS="${0:t}"
+typeset -gr RM_AIRBAG_EXECUTABLE="${0:a}"
+
+product_error() {
+  print -u2 -r -- "rm-airbag: $1"
+}
+
+product_help() {
+  print -r -- "rm-airbag $RM_AIRBAG_VERSION"
+  print -r -- "A Trash-first safety layer for ordinary rm commands on macOS."
+  print -r -- ""
+  print -r -- "Usage:"
+  print -r -- "  rm-airbag enable [--shim-only]  Enable the rm shim"
+  print -r -- "  rm-airbag disable               Disable the rm shim"
+  print -r -- "  rm-airbag doctor                Verify shell coverage and Trash access"
+  print -r -- "  rm-airbag status                Show the current installation state"
+  print -r -- "  rm-airbag version               Print the version"
+  print -r -- "  rm-airbag help                  Show this help"
+  print -r -- ""
+  print -r -- "After enable, open a new shell and use rm normally."
+}
+
+get_config_home() {
+  local config_home="${RM_AIRBAG_HOME:-$HOME}"
+  if [[ -z "$config_home" || "$config_home" != /* ]]; then
+    product_error "HOME must resolve to an absolute path"
+    return 1
+  fi
+  print -r -- "$config_home"
+}
+
+get_shim_dir() {
+  local config_home="$1"
+  print -r -- "$config_home/.local/share/rm-airbag/shims"
+}
+
+backup_config_file() {
+  local source_file="$1"
+  local backup_dir="$2"
+
+  [[ -e "$source_file" ]] || return 0
+  /bin/mkdir -p "$backup_dir" || return 1
+  /bin/cp -p "$source_file" "$backup_dir/${source_file:t}" || return 1
+}
+
+validate_managed_block() {
+  local config_file="$1"
+
+  [[ -e "$config_file" ]] || return 0
+  /usr/bin/awk \
+    -v start="$RM_AIRBAG_MARKER_START" \
+    -v finish="$RM_AIRBAG_MARKER_END" '
+      $0 == start {
+        if (inside) exit 42
+        inside = 1
+        next
+      }
+      $0 == finish {
+        if (!inside) exit 42
+        inside = 0
+        next
+      }
+      END { if (inside) exit 42 }
+    ' "$config_file" >/dev/null
+}
+
+strip_managed_block() {
+  local config_file="$1"
+  local temp_file mode
+
+  [[ -e "$config_file" ]] || return 0
+  temp_file=$(/usr/bin/mktemp "${config_file}.rm-airbag.XXXXXX") || return 1
+  mode=$(/usr/bin/stat -f '%Lp' "$config_file") || {
+    /bin/rm -f -- "$temp_file"
+    return 1
+  }
+
+  if ! /usr/bin/awk \
+    -v start="$RM_AIRBAG_MARKER_START" \
+    -v finish="$RM_AIRBAG_MARKER_END" '
+      $0 == start  { skipping = 1; next }
+      $0 == finish { skipping = 0; next }
+      !skipping     { print }
+      END           { if (skipping) exit 42 }
+    ' "$config_file" >| "$temp_file"; then
+    /bin/rm -f -- "$temp_file"
+    product_error "malformed managed block in $config_file; file left unchanged"
+    return 1
+  fi
+
+  /bin/chmod "$mode" "$temp_file" || {
+    /bin/rm -f -- "$temp_file"
+    return 1
+  }
+  /bin/mv -f -- "$temp_file" "$config_file"
+}
+
+append_managed_block() {
+  local config_file="$1"
+
+  [[ -e "$config_file" ]] || : >| "$config_file"
+  strip_managed_block "$config_file" || return 1
+
+  {
+    print -r -- ""
+    print -r -- "$RM_AIRBAG_MARKER_START"
+    print -r -- '# Keep the rm-airbag shim ahead of system rm.'
+    print -r -- 'export PATH="$HOME/.local/share/rm-airbag/shims:$PATH"'
+    print -r -- "$RM_AIRBAG_MARKER_END"
+  } >> "$config_file"
+}
+
+enable_rm_airbag() {
+  local shim_only=0
+  local config_home shim_dir shim_path binary_path existing_target
+  local backup_dir timestamp config_file
+  local -a config_files
+
+  case "${1:-}" in
+    "") ;;
+    --shim-only) shim_only=1 ;;
+    *) product_error "unknown enable option: $1"; return 2 ;;
+  esac
+
+  config_home=$(get_config_home) || return 1
+  shim_dir=$(get_shim_dir "$config_home")
+  shim_path="$shim_dir/rm"
+  binary_path="$RM_AIRBAG_EXECUTABLE"
+
+  if (( ! shim_only )); then
+    config_files=(
+      "$config_home/.zshenv"
+      "$config_home/.zprofile"
+      "$config_home/.bash_profile"
+      "$config_home/.profile"
+    )
+    for config_file in "${config_files[@]}"; do
+      if ! validate_managed_block "$config_file"; then
+        product_error "malformed managed block in $config_file; nothing was changed"
+        return 1
+      fi
+    done
+  fi
+
+  /bin/mkdir -p "$shim_dir" || {
+    product_error "cannot create shim directory: $shim_dir"
+    return 1
+  }
+
+  if [[ -L "$shim_path" ]]; then
+    existing_target=$(/usr/bin/readlink "$shim_path")
+    if [[ "$existing_target" != "$binary_path" ]]; then
+      case "$existing_target" in
+        */rm-airbag) /bin/rm -f -- "$shim_path" || return 1 ;;
+        *)
+          product_error "refusing to replace foreign shim: $shim_path -> $existing_target"
+          return 1
+          ;;
+      esac
+    fi
+  elif [[ -e "$shim_path" ]]; then
+    product_error "refusing to replace non-symlink file: $shim_path"
+    return 1
+  fi
+
+  [[ -L "$shim_path" ]] || /bin/ln -s "$binary_path" "$shim_path" || return 1
+
+  if (( ! shim_only )); then
+    timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
+    backup_dir="$config_home/.local/share/rm-airbag/backups/enable-$timestamp-$$"
+
+    for config_file in "${config_files[@]}"; do
+      backup_config_file "$config_file" "$backup_dir" || return 1
+      append_managed_block "$config_file" || return 1
+    done
+  fi
+
+  print -r -- "rm-airbag enabled"
+  print -r -- "shim: $shim_path -> $binary_path"
+  (( shim_only )) || print -r -- "Open a new shell, then run: rm-airbag doctor"
+}
+
+disable_rm_airbag() {
+  local config_home shim_dir shim_path backup_dir timestamp config_file
+  local -a config_files
+
+  [[ $# -eq 0 ]] || {
+    product_error "disable does not accept options"
+    return 2
+  }
+
+  config_home=$(get_config_home) || return 1
+  shim_dir=$(get_shim_dir "$config_home")
+  shim_path="$shim_dir/rm"
+  timestamp=$(/bin/date '+%Y%m%d-%H%M%S')
+  backup_dir="$config_home/.local/share/rm-airbag/backups/disable-$timestamp-$$"
+  config_files=(
+    "$config_home/.zshenv"
+    "$config_home/.zprofile"
+    "$config_home/.bash_profile"
+    "$config_home/.profile"
+  )
+
+  for config_file in "${config_files[@]}"; do
+    if [[ -e "$config_file" ]] && /usr/bin/grep -Fqx "$RM_AIRBAG_MARKER_START" "$config_file"; then
+      backup_config_file "$config_file" "$backup_dir" || return 1
+      strip_managed_block "$config_file" || return 1
+    fi
+  done
+
+  if [[ -L "$shim_path" ]]; then
+    /bin/rm -f -- "$shim_path" || return 1
+  elif [[ -e "$shim_path" ]]; then
+    product_error "foreign file left untouched: $shim_path"
+    return 1
+  fi
+  /bin/rmdir "$shim_dir" 2>/dev/null || true
+
+  print -r -- "rm-airbag disabled"
+  print -r -- "Open a new shell to refresh PATH resolution."
+}
+
+paths_resolve_equal() {
+  local first="$1" second="$2"
+  [[ -n "$first" && -n "$second" ]] || return 1
+  [[ "$first" == "$second" ]] && return 0
+  [[ -e "$first" && -e "$second" ]] || return 1
+  [[ "${first:A}" == "${second:A}" ]]
+}
+
+doctor_check_shell() {
+  local label="$1" shell_path="$2" shell_flags="$3"
+  local config_home="$4" expected_shim="$5" severity="$6"
+  local resolved
+
+  resolved=$(HOME="$config_home" RM_AIRBAG_HOME="$config_home" \
+    "$shell_path" "$shell_flags" 'command -v rm' 2>/dev/null)
+  if paths_resolve_equal "$resolved" "$expected_shim"; then
+    print -r -- "PASS  $label: $resolved"
+    return 0
+  fi
+
+  print -r -- "$severity  $label: ${resolved:-rm not found}"
+  return 1
+}
+
+doctor_rm_airbag() {
+  local config_home shim_dir shim_path resolved_current
+  local critical_failures=0 warnings=0
+
+  [[ $# -eq 0 ]] || {
+    product_error "doctor does not accept options"
+    return 2
+  }
+
+  config_home=$(get_config_home) || return 1
+  shim_dir=$(get_shim_dir "$config_home")
+  shim_path="$shim_dir/rm"
+
+  if [[ -x "$RM_AIRBAG_TRASH_BIN" ]]; then
+    print -r -- "PASS  Trash backend: $RM_AIRBAG_TRASH_BIN"
+  else
+    print -r -- "FAIL  Trash backend unavailable: $RM_AIRBAG_TRASH_BIN"
+    (( critical_failures++ ))
+  fi
+
+  if [[ -L "$shim_path" && -x "$shim_path" ]]; then
+    print -r -- "PASS  rm shim: $shim_path -> $(/usr/bin/readlink "$shim_path")"
+  else
+    print -r -- "FAIL  rm shim missing: $shim_path"
+    (( critical_failures++ ))
+  fi
+
+  doctor_check_shell "zsh login" /bin/zsh -lc "$config_home" "$shim_path" FAIL || (( critical_failures++ ))
+  doctor_check_shell "zsh non-login" /bin/zsh -c "$config_home" "$shim_path" FAIL || (( critical_failures++ ))
+  doctor_check_shell "bash login" /bin/bash -lc "$config_home" "$shim_path" WARN || (( warnings++ ))
+  doctor_check_shell "sh login" /bin/sh -lc "$config_home" "$shim_path" WARN || (( warnings++ ))
+
+  resolved_current=$(command -v rm 2>/dev/null)
+  if paths_resolve_equal "$resolved_current" "$shim_path"; then
+    print -r -- "PASS  current process: $resolved_current"
+  else
+    print -r -- "WARN  current process: ${resolved_current:-rm not found}"
+    print -r -- "      Open a new shell after enabling rm-airbag."
+    (( warnings++ ))
+  fi
+
+  print -r -- "INFO  explicit /bin/rm and non-rm deletion APIs bypass PATH protection"
+  print -r -- "Summary: $critical_failures critical failure(s), $warnings warning(s)"
+  (( critical_failures == 0 ))
+}
+
+status_rm_airbag() {
+  local config_home shim_dir shim_path resolved_current
+
+  [[ $# -eq 0 ]] || {
+    product_error "status does not accept options"
+    return 2
+  }
+
+  config_home=$(get_config_home) || return 1
+  shim_dir=$(get_shim_dir "$config_home")
+  shim_path="$shim_dir/rm"
+  resolved_current=$(command -v rm 2>/dev/null)
+
+  print -r -- "version: $RM_AIRBAG_VERSION"
+  if [[ -L "$shim_path" ]]; then
+    print -r -- "enabled: yes"
+    print -r -- "shim: $shim_path -> $(/usr/bin/readlink "$shim_path")"
+  else
+    print -r -- "enabled: no"
+    print -r -- "shim: $shim_path"
+  fi
+  print -r -- "current rm: ${resolved_current:-not found}"
+  print -r -- "trash backend: $RM_AIRBAG_TRASH_BIN"
+}
+
+safe_rm() {
+  emulate -L zsh
+
+  local version_line="rm (rm-airbag) $RM_AIRBAG_VERSION -- moves files to the macOS Trash"
+  local usage_line="usage: rm [-f | -i] [-dIRrv] file ..."
+  local trash_bin="$RM_AIRBAG_TRASH_BIN"
+  local force=0 recursive=0 dir_ok=0 interactive=0 ask_once=0 verbose=0
+  local parsing_opts=1 exit_status=0 trash_available=0
+  local arg target display_target ch reply i trash_err batch_trash_err error_detail
+  local -a operands to_remove display_targets entries
+
+  [[ -x "$trash_bin" ]] && trash_available=1
+
+  rm_error() {
+    print -u2 -r -- "rm: $1"
+    exit_status=1
+  }
+
+  rm_usage_error() {
+    print -u2 -r -- "rm: $1"
+    print -u2 -r -- "$usage_line"
+    return 1
+  }
+
+  is_protected_path() {
+    local absolute_path="$1"
+    case "$absolute_path" in
+      /|/bin|/sbin|/usr|/etc|/var|/tmp|/opt|/dev|/home|/private|/cores|/Library|/System|/Applications|/Users|/Volumes|"$HOME")
+        return 0 ;;
+      /Volumes/*)
+        [[ "$absolute_path" == /Volumes/*/* ]] || return 0 ;;
+    esac
+    return 1
+  }
+
+  for arg in "$@"; do
+    if (( parsing_opts )); then
+      case "$arg" in
+        --) parsing_opts=0; continue ;;
+        --help) print -r -- "$usage_line"; return 0 ;;
+        --version) print -r -- "$version_line"; return 0 ;;
+        --force) force=1; interactive=0; ask_once=0; continue ;;
+        --recursive) recursive=1; continue ;;
+        --dir) dir_ok=1; continue ;;
+        --verbose) verbose=1; continue ;;
+        --interactive|--interactive=always|--interactive=yes)
+          interactive=1; force=0; continue ;;
+        --interactive=once) ask_once=1; force=0; continue ;;
+        --interactive=never|--interactive=none|--interactive=no)
+          interactive=0; ask_once=0; continue ;;
+        --preserve-root|--preserve-root=*|--no-preserve-root) continue ;;
+        --one-file-system)
+          rm_usage_error "option '--one-file-system' is not supported; nothing was removed"
+          return 1
+          ;;
+        --*) rm_usage_error "unrecognized option '$arg'"; return 1 ;;
+        -?*)
+          for (( i = 2; i <= ${#arg}; i++ )); do
+            ch="${arg[i]}"
+            case "$ch" in
+              f) force=1; interactive=0; ask_once=0 ;;
+              r|R) recursive=1 ;;
+              d) dir_ok=1 ;;
+              i) interactive=1; force=0 ;;
+              I) ask_once=1; force=0 ;;
+              v) verbose=1 ;;
+              P) ;;
+              W|x)
+                rm_usage_error "option -$ch is not supported; nothing was removed"
+                return 1
+                ;;
+              *) rm_usage_error "illegal option -- $ch"; return 1 ;;
+            esac
+          done
+          continue
+          ;;
+      esac
+    fi
+    operands+=("$arg")
+  done
+
+  if (( ${#operands} == 0 )); then
+    (( force )) && return 0
+    print -u2 -r -- "rm: missing operand"
+    return 1
+  fi
+
+  if (( ask_once )) && (( recursive || ${#operands} > 3 )); then
+    local prompt_suffix=""
+    (( recursive )) && prompt_suffix=" recursively"
+    print -nu2 -r -- "rm: remove ${#operands} argument(s)${prompt_suffix}? "
+    if ! read -r reply; then
+      print -u2 -r -- ""
+      return 1
+    fi
+    [[ "$reply" == [yY]* ]] || return 1
+  fi
+
+  for target in "${operands[@]}"; do
+    while [[ "$target" == */ && "$target" != / ]]; do
+      target="${target%/}"
+    done
+    display_target="$target"
+
+    if [[ -z "$target" ]]; then
+      (( force )) || rm_error "cannot remove '': No such file or directory"
+      continue
+    fi
+    if [[ "${target:t}" == "." || "${target:t}" == ".." ]]; then
+      rm_error "refusing to remove '.' or '..' directory: skipping '$target'"
+      continue
+    fi
+    if is_protected_path "${target:a}"; then
+      rm_error "refusing to remove protected directory '$target'"
+      continue
+    fi
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      (( force )) || rm_error "cannot remove '$target': No such file or directory"
+      continue
+    fi
+    if [[ -d "$target" && ! -L "$target" ]] && (( ! recursive )); then
+      if (( dir_ok )); then
+        entries=("$target"/*(DN))
+        if (( ${#entries} )); then
+          rm_error "cannot remove '$target': Directory not empty"
+          continue
+        fi
+      else
+        rm_error "cannot remove '$target': Is a directory"
+        continue
+      fi
+    fi
+    if (( ! trash_available )); then
+      rm_error "cannot move '$target' to Trash (file left in place): '$trash_bin' is unavailable or not executable"
+      continue
+    fi
+    if (( interactive )); then
+      print -nu2 -r -- "rm: remove '$target'? "
+      if ! read -r reply; then
+        print -u2 -r -- ""
+        continue
+      fi
+      [[ "$reply" == [yY]* ]] || continue
+    fi
+
+    [[ "$target" == -* ]] && target="$PWD/$target"
+    to_remove+=("$target")
+    display_targets+=("$display_target")
+  done
+
+  if (( ${#to_remove} )); then
+    if ! batch_trash_err=$("$trash_bin" "${to_remove[@]}" 2>&1); then
+      for target in "${to_remove[@]}"; do
+        [[ -e "$target" || -L "$target" ]] || continue
+        trash_err=$("$trash_bin" "$target" 2>&1) && continue
+        error_detail="$trash_err"
+        [[ -n "$error_detail" ]] || error_detail="$batch_trash_err"
+        rm_error "cannot move '$target' to Trash (file left in place)${error_detail:+: $error_detail}"
+      done
+    fi
+    if (( verbose )); then
+      for (( i = 1; i <= ${#to_remove}; i++ )); do
+        target="${to_remove[i]}"
+        [[ -e "$target" || -L "$target" ]] || print -r -- "${display_targets[i]}"
+      done
+    fi
+  fi
+
+  return $exit_status
+}
+
+main() {
+  if [[ "$RM_AIRBAG_INVOKED_AS" == "rm" ]]; then
+    safe_rm "$@"
+    return $?
+  fi
+
+  case "${1:-help}" in
+    enable) shift; enable_rm_airbag "$@" ;;
+    disable) shift; disable_rm_airbag "$@" ;;
+    doctor) shift; doctor_rm_airbag "$@" ;;
+    status) shift; status_rm_airbag "$@" ;;
+    version|--version|-V) print -r -- "$RM_AIRBAG_VERSION" ;;
+    help|--help|-h) product_help ;;
+    *) product_error "unknown command: $1"; product_help >&2; return 2 ;;
+  esac
+}
+
+main "$@"

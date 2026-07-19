@@ -1,0 +1,30 @@
+class RmAirbag < Formula
+  desc "Trash-first, fail-closed rm safety layer for macOS"
+  homepage "https://github.com/gy-0/rm-airbag"
+  url "https://github.com/gy-0/rm-airbag/releases/download/v0.1.0/rm-airbag-0.1.0.tar.gz"
+  sha256 "REPLACE_WITH_RELEASE_ARCHIVE_SHA256"
+  license "MIT"
+
+  depends_on macos: :sequoia
+
+  def install
+    bin.install "bin/rm-airbag"
+  end
+
+  def caveats
+    <<~EOS
+      Enable the user-level rm shim, then open a new shell:
+
+        rm-airbag enable
+        exec zsh -l
+        rm-airbag doctor
+
+      rm-airbag never modifies /bin/rm.
+    EOS
+  end
+
+  test do
+    assert_equal version.to_s, shell_output("#{bin}/rm-airbag version").strip
+  end
+end
+
